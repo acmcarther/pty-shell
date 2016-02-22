@@ -12,5 +12,5 @@ keywords = ['pty', 'tty', 'shell', 'terminal']
 libc='0.2'
 mio='0.5'
 nix='0.4'
-pty='0.1.6'
+pty= { git = "https://github.com/acmcarther/pty-rs" }
 termios='0.2.0'
