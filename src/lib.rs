@@ -9,7 +9,7 @@ extern crate pty;
 extern crate termios;
 extern crate mio;
 
-use std::{fmt, io, result, thread};
+use std::{fmt, result, thread};
 use std::io::{Read, Write};
 
 pub use self::error::*;
@@ -60,16 +60,7 @@ impl PtyShell for pty::Child {
 fn do_proxy<H: PtyHandler + 'static>(pty: pty::ChildPTY, handler: H) -> Result<()> {
     let mut event_loop = try!(mio::EventLoop::new());
 
-    let mut writer = pty.clone();
-    let (input_reader, mut input_writer) = try!(mio::unix::pipe());
-
-    /*
-    thread::spawn(move || {
-        handle_input(&mut writer, &mut input_writer).unwrap_or_else(|e| {
-            println!("{:?}", e);
-        });
-    });
-    */
+    let (input_reader, _) = try!(mio::unix::pipe());
 
     let mut reader = pty.clone();
     let (output_reader, mut output_writer) = try!(mio::unix::pipe());
@@ -98,20 +89,6 @@ fn do_proxy<H: PtyHandler + 'static>(pty: pty::ChildPTY, handler: H) -> Result<(
     Ok(())
 }
 
-/*
-fn handle_input(writer: &mut pty::ChildPTY, handler_writer: &mut mio::unix::PipeWriter) -> Result<()> {
-    let mut input = io::stdin();
-    let mut buf   = [0; 128];
-
-    loop {
-        let nread = try!(input.read(&mut buf));
-
-        try!(writer.write(&buf[..nread]));
-        try!(handler_writer.write(&buf[..nread]));
-    }
-}
-*/
-
 fn handle_output(reader: &mut pty::ChildPTY, handler_writer: &mut mio::unix::PipeWriter) -> Result<()> {
     let mut buf    = [0; 1024 * 10];
 
@@ -127,6 +104,87 @@ fn handle_output(reader: &mut pty::ChildPTY, handler_writer: &mut mio::unix::Pip
 
     Ok(())
 }
+
+pub struct PtyCallbackData {
+    input_handler: Box<FnMut(&[u8])>,
+    output_handler: Box<FnMut(&[u8])>,
+    resize_handler: Box<FnMut(&Winsize)>,
+    shutdown_handler: Box<FnMut()>,
+}
+
+impl fmt::Debug for PtyCallbackData {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "(PtyCallbackData)")
+    }
+}
+
+impl PtyHandler for PtyCallbackData {
+    fn input(&mut self, data: &[u8]) {
+        (&mut *self.input_handler)(data);
+    }
+
+    fn output(&mut self, data: &[u8]) {
+        (&mut *self.output_handler)(data);
+    }
+
+    fn resize(&mut self, size: &Winsize) {
+        (&mut *self.resize_handler)(size);
+    }
+
+    fn shutdown(&mut self) {
+        (&mut *self.shutdown_handler)();
+    }
+}
+
+#[derive(Debug)]
+pub struct PtyCallbackBuilder(PtyCallbackData);
+
+impl PtyCallbackBuilder {
+    pub fn new() -> Self {
+        let data = PtyCallbackData {
+            input_handler: Box::new(|_| {}),
+            output_handler: Box::new(|_| {}),
+            resize_handler: Box::new(|_| {}),
+            shutdown_handler: Box::new(|| {}),
+        };
+
+        PtyCallbackBuilder(data)
+    }
+
+    pub fn input<F>(mut self, handler: F) -> Self
+        where F: FnMut(&[u8]) + 'static {
+            self.0.input_handler = Box::new(handler);
+
+            self
+    }
+
+    pub fn output<F>(mut self, handler: F) -> Self
+        where F: FnMut(&[u8]) + 'static {
+            self.0.output_handler = Box::new(handler);
+
+            self
+    }
+
+    pub fn resize<F>(mut self, handler: F) -> Self
+        where F: FnMut(&Winsize) + 'static {
+            self.0.resize_handler = Box::new(handler);
+
+            self
+    }
+
+    pub fn shutdown<F>(mut self, handler: F) -> Self
+        where F: FnMut() + 'static {
+            self.0.shutdown_handler = Box::new(handler);
+
+            self
+    }
+
+    pub fn build(self) -> PtyCallbackData {
+        self.0
+    }
+}
+
+pub type PtyCallback = PtyCallbackBuilder;
 
 #[cfg(test)]
 mod tests {
@@ -154,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn it_can_hook_stdout_with_handler() {
+    fn it_can_hook_pty_stdout_with_handler() {
       use std::io::Write;
         let child = pty::fork().unwrap();
         restore_termios();
@@ -162,7 +220,24 @@ mod tests {
         child.proxy(TestHandler).unwrap();
         child.exec("bash").unwrap();
 
-        child.pty().unwrap().write(b"exit\n");
+        child.pty().unwrap().write(b"exit\n").unwrap();
+
+        assert!(child.wait().is_ok());
+    }
+
+    #[test]
+    fn it_can_hook_pty_stdout_with_callback() {
+        use PtyCallback;
+
+        let child = pty::fork().unwrap();
+        restore_termios();
+
+        child.proxy(
+            PtyCallback::new()
+                .output(|data| assert!(data.len() != 0))
+                .build()
+        ).unwrap();
+        child.exec("pwd").unwrap();
 
         assert!(child.wait().is_ok());
     }
